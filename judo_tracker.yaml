@@ -2,9 +2,9 @@
 tracker_type: bytetrack
 track_high_thresh: 0.5
 track_low_thresh: 0.1
-new_track_thresh: 0.6
+new_track_thresh: 0.6 #0.6
 track_buffer: 120        # Your custom memory (4 seconds)
-match_thresh: 0.8
+match_thresh: 0.8 #0.8
 
 # --- Missing Keys causing the crash ---
 fuse_score: True         # Fuses detection score with tracking score (Required)
