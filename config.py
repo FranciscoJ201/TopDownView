@@ -1,23 +1,24 @@
 # config.py
 
 # --- INPUTS ---
-# Path to your video file
-VIDEO_SOURCE = "/Users/franciscojimenez/Desktop/recordings/GX011125.MP4"   
-# Path to your fine-tuned YOLO model
-MODEL_PATH = "yolo26n.pt"         
-# Where the matrix will be saved
+VIDEO_SOURCE = "standardizedjudo.mp4"   
+MODEL_PATH = "yolo26x.pt"         
 MATRIX_FILE = "homography_matrix.npy"
 
 # --- MAP SETTINGS ---
-# Dimensions of the top-down map window (Square)
-MAP_SIZE = 400  
+MAP_SIZE = 600  
+
+# --- REAL WORLD PHYSICS ---
+# The width of the square area you are clicking in meters.
+# International Standard: 10m x 10m (including the red danger zone)
+MAT_REAL_DIM_METERS = 10.0 
+METERS_PER_PIXEL = MAT_REAL_DIM_METERS / MAP_SIZE
 
 # --- VISUALIZATION ---
-# Colors (B, G, R)
-COLOR_PLAYER = (255, 0, 0)        # Blue dots
-COLOR_REF_OTHER = (128, 128, 128) # Grey dots
+COLOR_PLAYER = (255, 0, 0)        # Blue
+COLOR_REF_OTHER = (128, 128, 128) # Grey
 COLOR_TEXT = (0, 0, 0)
 
 # Detection Settings
 CONF_THRESHOLD = 0.5
-SMOOTHING_WINDOW = 5  # Frames to average for smoother dots
+SMOOTHING_WINDOW = 5

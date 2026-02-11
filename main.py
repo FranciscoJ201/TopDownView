@@ -6,7 +6,7 @@ from ultralytics import YOLO
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QSlider, QLabel, QFileDialog, 
-                             QMessageBox, QFrame, QSizePolicy)
+                             QMessageBox, QFrame, QSizePolicy, QTextEdit)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 
@@ -32,7 +32,7 @@ class JudoTrackerApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Judo Match Tracker & Mapper")
-        self.resize(1450, 900)
+        self.resize(1450, 950)
         
         # --- LOGIC MODULES ---
         self.pm = PerspectiveManager()
@@ -52,7 +52,10 @@ class JudoTrackerApp(QMainWindow):
         
         self.calibration_points = []
         self.is_calibrating = False
-        self.history = {}
+        
+        # Tracking History & Stats
+        self.history = {} 
+        self.stats = {} # Stores current distance for each ID
 
         # --- UI SETUP ---
         self.setup_ui()
@@ -81,7 +84,6 @@ class JudoTrackerApp(QMainWindow):
         video_container = QWidget()
         v_layout = QVBoxLayout(video_container)
         self.lbl_video = ClickableVideoLabel()
-        # Simple border to show where the video area is
         self.lbl_video.setStyleSheet("border: 1px solid #555;") 
         self.lbl_video.click_signal.connect(self.handle_video_click)
         
@@ -90,9 +92,11 @@ class JudoTrackerApp(QMainWindow):
         v_layout.addWidget(self.lbl_video)
         viz_layout.addWidget(video_container, stretch=2)
 
-        # Right: Map (Fixed Size)
+        # Right: Map + Stats
         map_container = QWidget()
         m_layout = QVBoxLayout(map_container)
+        
+        # Map Display
         self.lbl_map = QLabel()
         self.lbl_map.setFixedSize(config.MAP_SIZE, config.MAP_SIZE)
         self.lbl_map.setStyleSheet("border: 1px solid #555; background-color: white;")
@@ -101,6 +105,16 @@ class JudoTrackerApp(QMainWindow):
         lbl_map_title = QLabel("<b>Top-Down Analysis</b>")
         m_layout.addWidget(lbl_map_title)
         m_layout.addWidget(self.lbl_map)
+        
+        # Live Stats Box
+        m_layout.addSpacing(10)
+        m_layout.addWidget(QLabel("<b>Live Radial Control</b>"))
+        self.txt_stats = QTextEdit()
+        self.txt_stats.setReadOnly(True)
+        self.txt_stats.setMaximumHeight(150)
+        self.txt_stats.setStyleSheet("font-family: monospace; font-size: 12px;")
+        m_layout.addWidget(self.txt_stats)
+        
         m_layout.addStretch() 
         viz_layout.addWidget(map_container, stretch=1) 
 
@@ -110,12 +124,10 @@ class JudoTrackerApp(QMainWindow):
         controls = QFrame()
         c_layout = QHBoxLayout(controls)
 
-        # Load
         self.btn_load = QPushButton("📂 Open Video")
         self.btn_load.clicked.connect(lambda: self.load_video())
         c_layout.addWidget(self.btn_load)
 
-        # Calibrate
         self.btn_calibrate = QPushButton("📐 Calibrate")
         self.btn_calibrate.setCheckable(True)
         self.btn_calibrate.clicked.connect(self.toggle_calibration_mode)
@@ -123,7 +135,6 @@ class JudoTrackerApp(QMainWindow):
 
         c_layout.addSpacing(30)
 
-        # Media Controls
         self.btn_prev = QPushButton("⏮ Prev")
         self.btn_prev.clicked.connect(self.prev_frame)
         c_layout.addWidget(self.btn_prev)
@@ -138,7 +149,6 @@ class JudoTrackerApp(QMainWindow):
 
         c_layout.addSpacing(20)
 
-        # Scrubber
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.sliderPressed.connect(self.slider_pressed)
         self.slider.sliderReleased.connect(self.slider_released)
@@ -148,11 +158,22 @@ class JudoTrackerApp(QMainWindow):
         self.main_layout.addWidget(controls)
 
     def init_map_bg(self):
+        # Create White Background
         self.map_bg = np.ones((config.MAP_SIZE, config.MAP_SIZE, 3), dtype=np.uint8) * 255
-        center = config.MAP_SIZE // 2
-        cv2.circle(self.map_bg, (center, center), int(config.MAP_SIZE * 0.4), (0, 0, 255), 2)
-        cv2.line(self.map_bg, (center - 20, center), (center + 20, center), (0,0,255), 2)
-        cv2.line(self.map_bg, (center, center - 20), (center, center + 20), (0,0,255), 2)
+        center = (config.MAP_SIZE // 2, config.MAP_SIZE // 2)
+        
+        # 1. Outer Danger Zone (Red Ring) - Approx 4m radius (8m diameter)
+        radius_danger_px = int((4.0 / config.MAT_REAL_DIM_METERS) * config.MAP_SIZE)
+        cv2.circle(self.map_bg, center, radius_danger_px, (0, 0, 255), 2) # Red
+        
+        # 2. Safe Zone (Green Circle) - Approx 2m radius (4m diameter)
+        radius_safe_px = int((2.0 / config.MAT_REAL_DIM_METERS) * config.MAP_SIZE)
+        cv2.circle(self.map_bg, center, radius_safe_px, (0, 200, 0), 1) # Green
+        
+        # 3. Center Cross
+        cv2.line(self.map_bg, (center[0] - 10, center[1]), (center[0] + 10, center[1]), (0,0,0), 1)
+        cv2.line(self.map_bg, (center[0], center[1] - 10), (center[0], center[1] + 10), (0,0,0), 1)
+        
         self.update_map_display(self.map_bg)
 
     def update_calibration_status(self):
@@ -196,37 +217,30 @@ class JudoTrackerApp(QMainWindow):
         self.slider.blockSignals(False)
 
     def display_video_frame(self, cv_img):
-        """Scales the video frame to fit the GUI label while keeping aspect ratio."""
         h, w, ch = cv_img.shape
-        bytes_per_line = ch * w
-        
-        # 1. Convert to Qt Image
-        qt_img = QImage(cv_img.data, w, h, bytes_per_line, QImage.Format.Format_BGR888)
+        qt_img = QImage(cv_img.data, w, h, ch * w, QImage.Format.Format_BGR888)
         self.display_pixmap = QPixmap.fromImage(qt_img)
-
-        # 2. Scale to fit the label (Keep Aspect Ratio)
         scaled_pixmap = self.display_pixmap.scaled(
-            self.lbl_video.size(), 
-            Qt.AspectRatioMode.KeepAspectRatio, 
-            Qt.TransformationMode.SmoothTransformation
+            self.lbl_video.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         )
         self.lbl_video.setPixmap(scaled_pixmap)
 
     def resizeEvent(self, event):
-        """Handle window resizing to re-scale the video frame."""
         if self.display_pixmap is not None:
              scaled_pixmap = self.display_pixmap.scaled(
-                self.lbl_video.size(), 
-                Qt.AspectRatioMode.KeepAspectRatio, 
-                Qt.TransformationMode.SmoothTransformation
+                self.lbl_video.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
             )
              self.lbl_video.setPixmap(scaled_pixmap)
         super().resizeEvent(event)
 
     def run_inference_and_map(self, frame):
-        # Run Tracking
         results = self.model.track(frame, classes=[0], persist=True, verbose=False, conf=config.CONF_THRESHOLD)
         map_viz = self.map_bg.copy()
+        
+        # Center of map for distance calc
+        center_x, center_y = config.MAP_SIZE // 2, config.MAP_SIZE // 2
+        
+        stats_text = ""
 
         for result in results:
             if result.boxes.id is not None:
@@ -237,6 +251,7 @@ class JudoTrackerApp(QMainWindow):
                     x1, y1, x2, y2 = box
                     foot_x, foot_y = (x1 + x2) / 2, y2
 
+                    # Smoothing
                     if track_id not in self.history:
                         self.history[track_id] = deque(maxlen=config.SMOOTHING_WINDOW)
                     self.history[track_id].append((foot_x, foot_y))
@@ -244,17 +259,28 @@ class JudoTrackerApp(QMainWindow):
                     avg_x = sum(p[0] for p in self.history[track_id]) / len(self.history[track_id])
                     avg_y = sum(p[1] for p in self.history[track_id]) / len(self.history[track_id])
 
+                    # Transform
                     mx, my = self.pm.transform_point(avg_x, avg_y)
 
                     if 0 <= mx <= config.MAP_SIZE and 0 <= my <= config.MAP_SIZE:
+                        # --- MATH: Radial Distance ---
+                        dist_px = np.sqrt((mx - center_x)**2 + (my - center_y)**2)
+                        dist_m = dist_px * config.METERS_PER_PIXEL
+                        
+                        # Update Stats String
+                        stats_text += f"ID {track_id}: {dist_m:.2f}m from center\n"
+
+                        # Draw Visuals
                         cv2.circle(map_viz, (mx, my), 8, config.COLOR_PLAYER, -1)
-                        cv2.putText(map_viz, f"ID:{track_id}", (mx+10, my), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1)
+                        cv2.putText(map_viz, f"{track_id}", (mx+10, my), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1)
+                        
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                        cv2.putText(frame, f"ID:{track_id}", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                        cv2.putText(frame, f"ID:{track_id} | {dist_m:.1f}m", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                     else:
                         cv2.circle(map_viz, (mx, my), 6, config.COLOR_REF_OTHER, -1)
 
         self.update_map_display(map_viz)
+        self.txt_stats.setText(stats_text)
         return frame
 
     # --- CALIBRATION HANDLERS ---
@@ -273,13 +299,11 @@ class JudoTrackerApp(QMainWindow):
             self.update_frame()
 
     def handle_video_click(self, x, y):
-        # Scale Click Logic
         if not self.is_calibrating or self.current_frame is None: return
 
         pixmap = self.lbl_video.pixmap()
         if not pixmap: return
         
-        # Calculate offsets (Image is centered)
         img_w = pixmap.width()
         img_h = pixmap.height()
         lbl_w = self.lbl_video.width()
